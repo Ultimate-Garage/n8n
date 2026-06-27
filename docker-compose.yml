@@ -2,10 +2,13 @@ services:
   postgres:
     image: postgres:16-alpine
     restart: unless-stopped
+    networks:
+      - n8n-internal
     environment:
       POSTGRES_DB: ${POSTGRES_DB}
       POSTGRES_USER: ${POSTGRES_USER}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      TZ: ${GENERIC_TIMEZONE:-America/Montreal}
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
@@ -13,62 +16,99 @@ services:
       interval: 10s
       timeout: 5s
       retries: 10
+      start_period: 20s
 
   redis:
     image: redis:7-alpine
     restart: unless-stopped
-    command: ['redis-server', '--appendonly', 'yes', '--requirepass', '${REDIS_PASSWORD}']
+    networks:
+      - n8n-internal
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD}
+      TZ: ${GENERIC_TIMEZONE:-America/Montreal}
+    command: >
+      sh -c 'exec redis-server
+      --appendonly yes
+      --requirepass "$$REDIS_PASSWORD"'
     volumes:
       - redis_data:/data
     healthcheck:
-      test: ['CMD', 'redis-cli', '-a', '${REDIS_PASSWORD}', 'ping']
+      test: ['CMD-SHELL', 'redis-cli -a "$$REDIS_PASSWORD" --no-auth-warning ping | grep PONG']
       interval: 10s
       timeout: 5s
       retries: 10
+      start_period: 10s
 
   n8n:
-    image: docker.n8n.io/n8nio/n8n:${N8N_VERSION:-latest}
+    image: docker.n8n.io/n8nio/n8n:${N8N_VERSION}
     restart: unless-stopped
+    networks:
+      - n8n-internal
     depends_on:
       postgres:
         condition: service_healthy
       redis:
         condition: service_healthy
     ports:
-      - '${N8N_PORT:-5678}:5678'
+      # If your reverse proxy runs on the same Docker host, this is safer than exposing 0.0.0.0.
+      # If your proxy is on another host, change this back to "${N8N_PORT:-5678}:5678".
+      - '127.0.0.1:${N8N_PORT:-5678}:5678'
     environment: &n8n-environment
+      # Database
       DB_TYPE: postgresdb
       DB_POSTGRESDB_HOST: postgres
       DB_POSTGRESDB_PORT: 5432
       DB_POSTGRESDB_DATABASE: ${POSTGRES_DB}
       DB_POSTGRESDB_USER: ${POSTGRES_USER}
       DB_POSTGRESDB_PASSWORD: ${POSTGRES_PASSWORD}
+
+      # Core n8n
       N8N_ENCRYPTION_KEY: ${N8N_ENCRYPTION_KEY}
       N8N_HOST: ${N8N_HOST}
       N8N_PORT: 5678
       N8N_PROTOCOL: ${N8N_PROTOCOL:-https}
       WEBHOOK_URL: ${WEBHOOK_URL}
-      GENERIC_TIMEZONE: ${GENERIC_TIMEZONE:-UTC}
-      TZ: ${GENERIC_TIMEZONE:-UTC}
+      GENERIC_TIMEZONE: ${GENERIC_TIMEZONE:-America/Montreal}
+      TZ: ${GENERIC_TIMEZONE:-America/Montreal}
+
+      # Reverse proxy
+      # Use 1 for one proxy, 2 if Cloudflare + local proxy.
+      N8N_PROXY_HOPS: ${N8N_PROXY_HOPS:-1}
+      N8N_SECURE_COOKIE: ${N8N_SECURE_COOKIE:-true}
+
+      # Queue mode
       EXECUTIONS_MODE: queue
       QUEUE_BULL_REDIS_HOST: redis
       QUEUE_BULL_REDIS_PORT: 6379
       QUEUE_BULL_REDIS_PASSWORD: ${REDIS_PASSWORD}
-      N8N_RUNNERS_ENABLED: 'true'
-      N8N_ENFORCE_SETTINGS_FILE_PERMISSIONS: 'true'
-      N8N_SECURE_COOKIE: ${N8N_SECURE_COOKIE:-true}
-      N8N_DIAGNOSTICS_ENABLED: ${N8N_DIAGNOSTICS_ENABLED:-false}
-      N8N_PERSONALIZATION_ENABLED: ${N8N_PERSONALIZATION_ENABLED:-false}
+
+      # Manual executions
+      OFFLOAD_MANUAL_EXECUTIONS_TO_WORKERS: ${OFFLOAD_MANUAL_EXECUTIONS_TO_WORKERS:-true}
+
+      # Execution cleanup
       EXECUTIONS_DATA_PRUNE: 'true'
       EXECUTIONS_DATA_MAX_AGE: ${EXECUTIONS_DATA_MAX_AGE:-336}
-      OFFLOAD_MANUAL_EXECUTIONS_TO_WORKERS: 'true'
+
+      # Upload / webhook payload limits
+      N8N_PAYLOAD_SIZE_MAX: ${N8N_PAYLOAD_SIZE_MAX:-100}
+      N8N_FORMDATA_FILE_SIZE_MAX: ${N8N_FORMDATA_FILE_SIZE_MAX:-500}
+
+      # Privacy / telemetry
+      N8N_DIAGNOSTICS_ENABLED: ${N8N_DIAGNOSTICS_ENABLED:-false}
+      N8N_PERSONALIZATION_ENABLED: ${N8N_PERSONALIZATION_ENABLED:-false}
+
+      # File permissions
+      N8N_ENFORCE_SETTINGS_FILE_PERMISSIONS: 'true'
+
     volumes:
       - n8n_data:/home/node/.n8n
 
   n8n-worker:
-    image: docker.n8n.io/n8nio/n8n:${N8N_VERSION:-latest}
+    image: docker.n8n.io/n8nio/n8n:${N8N_VERSION}
     restart: unless-stopped
-    command: worker --concurrency=${N8N_WORKER_CONCURRENCY:-10}
+    command: worker --concurrency=${N8N_WORKER_CONCURRENCY:-5}
+    networks:
+      - n8n-internal
     depends_on:
       postgres:
         condition: service_healthy
@@ -83,3 +123,7 @@ volumes:
   postgres_data:
   redis_data:
   n8n_data:
+
+networks:
+  n8n-internal:
+    driver: bridge
