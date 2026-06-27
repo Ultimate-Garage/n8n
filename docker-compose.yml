@@ -52,7 +52,7 @@ services:
     ports:
       # If your reverse proxy runs on the same Docker host, this is safer than exposing 0.0.0.0.
       # If your proxy is on another host, change this back to "${N8N_PORT:-5678}:5678".
-      - '127.0.0.1:${N8N_PORT:-5678}:5678'
+      - '${N8N_PORT:-5678}:5678'
     environment: &n8n-environment
       # Database
       DB_TYPE: postgresdb
